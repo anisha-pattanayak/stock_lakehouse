@@ -1,0 +1,21 @@
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: true
+
+  - name: PostgreSQL
+    type: postgres
+    url: postgres:5432
+    database: lakehouse_meta
+    user: lakehouse_user
+    secureJsonData:
+      password: lakehouse_pass
+    jsonData:
+      sslmode: disable
+      postgresVersion: 1500
+    editable: true

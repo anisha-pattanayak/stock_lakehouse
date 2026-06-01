@@ -1,0 +1,101 @@
+# ============================================================
+# .gitignore — Stock Market Lakehouse Platform
+# ============================================================
+
+# ── Secrets & Environment ───────────────────────────────────
+# NEVER commit actual .env — only the .env.example template
+.env
+*.env
+!.env.example
+
+# AWS credentials
+.aws/
+*.pem
+*.key
+*.p12
+credentials
+
+# ── Python ──────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+*.pyd
+.Python
+pip-log.txt
+.eggs/
+*.egg-info/
+*.egg
+dist/
+build/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+coverage.xml
+htmlcov/
+.tox/
+
+# ── Jupyter ─────────────────────────────────────────────────
+.ipynb_checkpoints
+*.ipynb
+
+# ── Lakehouse Data (never commit actual data files) ─────────
+/data/
+*.parquet
+*.delta
+*.avro
+*.orc
+_delta_log/
+
+# ── Spark ───────────────────────────────────────────────────
+/tmp/
+spark-warehouse/
+derby.log
+metastore_db/
+
+# ── Airflow ─────────────────────────────────────────────────
+airflow/logs/
+airflow.db
+airflow.cfg
+standalone_admin_password.txt
+
+# ── dbt ─────────────────────────────────────────────────────
+dbt/target/
+dbt/dbt_packages/
+dbt/logs/
+dbt/.user.yml
+
+# ── Docker overrides ────────────────────────────────────────
+docker-compose.override.yml
+docker-compose.local.yml
+
+# ── IDE & OS ────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Terraform ───────────────────────────────────────────────
+infrastructure/terraform/.terraform/
+infrastructure/terraform/*.tfstate
+infrastructure/terraform/*.tfstate.backup
+infrastructure/terraform/*.tfvars
+!infrastructure/terraform/*.tfvars.example
+infrastructure/terraform/.terraform.lock.hcl
+
+# ── Kubernetes secrets ───────────────────────────────────────
+kubernetes/**/secret*.yaml
+kubernetes/**/secrets*.yaml
+
+# ── Logs ────────────────────────────────────────────────────
+*.log
+logs/
+
+# ── Test artifacts ──────────────────────────────────────────
+test-results/
+junit.xml

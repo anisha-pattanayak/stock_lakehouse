@@ -1,0 +1,3 @@
+# Airflow extra requirements
+# Install via: pip install -r airflow/requirements.txt
+httpx==0.25.2

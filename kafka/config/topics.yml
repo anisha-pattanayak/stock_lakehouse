@@ -1,0 +1,17 @@
+topics:
+  - name: raw-stock-events
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 604800000
+  - name: cleaned-stock-events
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 604800000
+  - name: analytics-events
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 604800000
+  - name: alerts-events
+    partitions: 3
+    replication_factor: 1
+    retention_ms: 86400000

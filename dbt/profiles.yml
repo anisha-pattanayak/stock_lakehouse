@@ -1,0 +1,12 @@
+stock_lakehouse:
+  target: dev
+  outputs:
+    dev:
+      type: postgres
+      host: "{{ env_var('POSTGRES_HOST', 'localhost') }}"
+      port: "{{ env_var('POSTGRES_PORT', '5432') | int }}"
+      user: "{{ env_var('POSTGRES_USER', 'lakehouse_user') }}"
+      password: "{{ env_var('POSTGRES_PASSWORD', 'lakehouse_pass') }}"
+      dbname: "{{ env_var('POSTGRES_DB', 'lakehouse_meta') }}"
+      schema: public
+      threads: 4

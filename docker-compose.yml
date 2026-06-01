@@ -1,0 +1,360 @@
+version: "3.9"
+
+# ============================================================
+# Real-Time Stock Market Lakehouse Platform
+# Full Docker Compose Stack
+# ============================================================
+
+x-common-env: &common-env
+  env_file:
+    - .env
+
+networks:
+  lakehouse-net:
+    driver: bridge
+
+volumes:
+  lakehouse-data:
+  kafka-data:
+  zookeeper-data:
+  postgres-data:
+  grafana-data:
+  prometheus-data:
+  airflow-logs:
+  spark-checkpoints:
+
+services:
+
+  # ─────────────────────────────────────────
+  # ZOOKEEPER (Kafka dependency)
+  # ─────────────────────────────────────────
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
+    networks: [lakehouse-net]
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
+    volumes:
+      - zookeeper-data:/var/lib/zookeeper/data
+    healthcheck:
+      test: ["CMD", "bash", "-c", "echo ruok | nc localhost 2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # APACHE KAFKA
+  # ─────────────────────────────────────────
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
+    networks: [lakehouse-net]
+    depends_on:
+      zookeeper:
+        condition: service_healthy
+    ports:
+      - "9092:9092"
+      - "9101:9101"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:29092,PLAINTEXT_HOST://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_JMX_PORT: 9101
+      KAFKA_JMX_HOSTNAME: localhost
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    volumes:
+      - kafka-data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ─────────────────────────────────────────
+  # KAFKA UI (web management console)
+  # ─────────────────────────────────────────
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: kafka-ui
+    networks: [lakehouse-net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    ports:
+      - "8090:8080"
+    environment:
+      KAFKA_CLUSTERS_0_NAME: local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_ZOOKEEPER: zookeeper:2181
+
+  # ─────────────────────────────────────────
+  # KAFKA TOPIC INITIALIZER
+  # ─────────────────────────────────────────
+  kafka-init:
+    image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka-init
+    networks: [lakehouse-net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    # Bug fix: Use bash -c with a properly quoted compound command string
+    entrypoint: ["/bin/bash", "-c"]
+    command: >-
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1 --topic raw-stock-events &&
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1 --topic cleaned-stock-events &&
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1 --topic analytics-events &&
+      kafka-topics --create --if-not-exists --bootstrap-server kafka:29092 --partitions 3 --replication-factor 1 --topic alerts-events &&
+      echo All Kafka topics created successfully
+
+  # ─────────────────────────────────────────
+  # STOCK DATA INGESTION SERVICE
+  # ─────────────────────────────────────────
+  ingestion:
+    build:
+      context: ./ingestion
+      dockerfile: Dockerfile
+    container_name: stock-ingestion
+    networks: [lakehouse-net]
+    depends_on:
+      kafka:
+        condition: service_healthy
+    env_file: .env
+    volumes:
+      - ./configs:/app/configs
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # APACHE SPARK MASTER
+  # ─────────────────────────────────────────
+  spark-master:
+    build:
+      context: ./spark-processing
+      dockerfile: Dockerfile
+    container_name: spark-master
+    networks: [lakehouse-net]
+    ports:
+      - "8082:8080"
+      - "7077:7077"
+    environment:
+      SPARK_MODE: master
+      SPARK_RPC_AUTHENTICATION_ENABLED: "no"
+      SPARK_RPC_ENCRYPTION_ENABLED: "no"
+    volumes:
+      - lakehouse-data:/data/lakehouse
+      - spark-checkpoints:/tmp/spark-checkpoints
+    env_file: .env
+
+  # ─────────────────────────────────────────
+  # APACHE SPARK WORKER
+  # ─────────────────────────────────────────
+  spark-worker:
+    build:
+      context: ./spark-processing
+      dockerfile: Dockerfile
+    container_name: spark-worker
+    networks: [lakehouse-net]
+    depends_on:
+      - spark-master
+    environment:
+      SPARK_MODE: worker
+      SPARK_MASTER_URL: spark://spark-master:7077
+      SPARK_WORKER_MEMORY: 2G
+      SPARK_WORKER_CORES: 2
+    volumes:
+      - lakehouse-data:/data/lakehouse
+      - spark-checkpoints:/tmp/spark-checkpoints
+    env_file: .env
+
+  # ─────────────────────────────────────────
+  # SPARK STREAMING JOB (Bronze → Silver → Gold)
+  # ─────────────────────────────────────────
+  spark-streaming:
+    build:
+      context: ./spark-processing
+      dockerfile: Dockerfile
+    container_name: spark-streaming
+    networks: [lakehouse-net]
+    depends_on:
+      spark-master:
+        condition: service_started
+      kafka:
+        condition: service_healthy
+    command: >
+      spark-submit
+      --master spark://spark-master:7077
+      --packages org.apache.spark:spark-sql-kafka-0-10_2.12:3.4.0,io.delta:delta-core_2.12:2.4.0
+      --conf spark.sql.extensions=io.delta.sql.DeltaSparkSessionExtension
+      --conf spark.sql.catalog.spark_catalog=org.apache.spark.sql.delta.catalog.DeltaCatalog
+      /app/streaming_pipeline.py
+    volumes:
+      - lakehouse-data:/data/lakehouse
+      - spark-checkpoints:/tmp/spark-checkpoints
+    env_file: .env
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # POSTGRESQL (Metadata, Airflow, API store)
+  # ─────────────────────────────────────────
+  postgres:
+    image: postgres:15
+    container_name: postgres
+    networks: [lakehouse-net]
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lakehouse_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-lakehouse_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-lakehouse_meta}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lakehouse_user}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ─────────────────────────────────────────
+  # FASTAPI — REST API Layer
+  # ─────────────────────────────────────────
+  api:
+    build:
+      context: ./api
+      dockerfile: Dockerfile
+    container_name: stock-api
+    networks: [lakehouse-net]
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - lakehouse-data:/data/lakehouse
+    env_file: .env
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # STREAMLIT DASHBOARD
+  # ─────────────────────────────────────────
+  dashboard:
+    build:
+      context: ./dashboards/streamlit
+      dockerfile: Dockerfile
+    container_name: stock-dashboard
+    networks: [lakehouse-net]
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+    env_file: .env
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # APACHE AIRFLOW (orchestration)
+  # ─────────────────────────────────────────
+  airflow-webserver:
+    image: apache/airflow:2.7.2
+    container_name: airflow-webserver
+    networks: [lakehouse-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    ports:
+      - "8080:8080"
+    env_file: .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow_db
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: "true"
+      _PIP_ADDITIONAL_REQUIREMENTS: "httpx==0.25.2"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins
+      - airflow-logs:/opt/airflow/logs
+    command: webserver
+    restart: unless-stopped
+
+  airflow-scheduler:
+    image: apache/airflow:2.7.2
+    container_name: airflow-scheduler
+    networks: [lakehouse-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-init:
+        condition: service_completed_successfully
+    env_file: .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow_db
+      _PIP_ADDITIONAL_REQUIREMENTS: "httpx==0.25.2"
+    volumes:
+      - ./airflow/dags:/opt/airflow/dags
+      - ./airflow/plugins:/opt/airflow/plugins
+      - airflow-logs:/opt/airflow/logs
+    command: scheduler
+    restart: unless-stopped
+
+  airflow-init:
+    image: apache/airflow:2.7.2
+    container_name: airflow-init
+    networks: [lakehouse-net]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file: .env
+    environment:
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/airflow_db
+      _PIP_ADDITIONAL_REQUIREMENTS: "httpx==0.25.2"
+    command: >
+      bash -c "airflow db init && airflow users create --username admin --password admin123 --firstname Admin --lastname User --role Admin --email admin@lakehouse.com"
+
+  # ─────────────────────────────────────────
+  # PROMETHEUS (metrics)
+  # ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.47.0
+    container_name: prometheus
+    networks: [lakehouse-net]
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    restart: unless-stopped
+
+  # ─────────────────────────────────────────
+  # GRAFANA (dashboards)
+  # ─────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.1.0
+    container_name: grafana
+    networks: [lakehouse-net]
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:-admin123}
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards
+    restart: unless-stopped

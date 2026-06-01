@@ -1,0 +1,206 @@
+---
+# ============================================================
+# Kubernetes Namespace
+# ============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: stock-lakehouse
+  labels:
+    project: stock-lakehouse
+
+---
+# ============================================================
+# Stock Ingestion Deployment
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stock-ingestion
+  namespace: stock-lakehouse
+  labels:
+    app: stock-ingestion
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stock-ingestion
+  template:
+    metadata:
+      labels:
+        app: stock-ingestion
+    spec:
+      containers:
+        - name: ingestion
+          image: ghcr.io/YOUR_ORG/stock-lakehouse-ingestion:latest
+          envFrom:
+            - secretRef:
+                name: lakehouse-secrets
+            - configMapRef:
+                name: lakehouse-config
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+          livenessProbe:
+            exec:
+              command: ["pgrep", "-f", "producer.py"]
+            initialDelaySeconds: 30
+            periodSeconds: 30
+
+---
+# ============================================================
+# FastAPI Deployment
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stock-api
+  namespace: stock-lakehouse
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: stock-api
+  template:
+    metadata:
+      labels:
+        app: stock-api
+    spec:
+      containers:
+        - name: api
+          image: ghcr.io/YOUR_ORG/stock-lakehouse-api:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef:
+                name: lakehouse-secrets
+            - configMapRef:
+                name: lakehouse-config
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "1000m"
+          readinessProbe:
+            httpGet:
+              path: /api/health/
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /api/health/
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 30
+
+---
+# ============================================================
+# Streamlit Dashboard Deployment
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: stock-dashboard
+  namespace: stock-lakehouse
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: stock-dashboard
+  template:
+    metadata:
+      labels:
+        app: stock-dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: ghcr.io/YOUR_ORG/stock-lakehouse-dashboard:latest
+          ports:
+            - containerPort: 8501
+          envFrom:
+            - configMapRef:
+                name: lakehouse-config
+          resources:
+            requests:
+              memory: "256Mi"
+              cpu: "250m"
+            limits:
+              memory: "512Mi"
+              cpu: "500m"
+
+---
+# ============================================================
+# Services
+# ============================================================
+apiVersion: v1
+kind: Service
+metadata:
+  name: stock-api-svc
+  namespace: stock-lakehouse
+spec:
+  selector:
+    app: stock-api
+  ports:
+    - port: 8000
+      targetPort: 8000
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: stock-dashboard-svc
+  namespace: stock-lakehouse
+spec:
+  selector:
+    app: stock-dashboard
+  ports:
+    - port: 8501
+      targetPort: 8501
+  type: LoadBalancer
+
+---
+# ============================================================
+# ConfigMap
+# ============================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: lakehouse-config
+  namespace: stock-lakehouse
+data:
+  KAFKA_BOOTSTRAP_SERVERS: "kafka:9092"
+  KAFKA_TOPIC_RAW: "raw-stock-events"
+  KAFKA_TOPIC_ANALYTICS: "analytics-events"
+  STOCK_SYMBOLS: "AAPL,MSFT,GOOGL,AMZN,TSLA,META,NVDA,JPM,V,JNJ"
+  INGESTION_INTERVAL_SECONDS: "10"
+  API_PROVIDER: "alpha_vantage"
+  BRONZE_PATH: "/data/lakehouse/bronze"
+  SILVER_PATH: "/data/lakehouse/silver"
+  GOLD_PATH: "/data/lakehouse/gold"
+  API_BASE_URL: "http://stock-api-svc:8000"
+
+---
+# ============================================================
+# Secret (fill these in with base64-encoded values)
+# ============================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: lakehouse-secrets
+  namespace: stock-lakehouse
+type: Opaque
+stringData:
+  ALPHA_VANTAGE_API_KEY: "REPLACE_ME"
+  FINNHUB_API_KEY: "REPLACE_ME"
+  POSTGRES_USER: "lakehouse_user"
+  POSTGRES_PASSWORD: "lakehouse_pass"
+  POSTGRES_HOST: "postgres"
+  SECRET_KEY: "REPLACE_WITH_STRONG_SECRET"
